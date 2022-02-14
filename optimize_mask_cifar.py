@@ -8,42 +8,53 @@ from torch.utils.data import DataLoader, RandomSampler
 from torchvision.datasets import CIFAR10
 import torchvision.transforms as transforms
 
-import models
-import data.poison_cifar as poison
+from . import models
+from .data import poison_cifar as poison
 
-parser = argparse.ArgumentParser(description='Train poisoned networks')
 
-# Basic model parameters.
-parser.add_argument('--arch', type=str, default='resnet18',
-                    choices=['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152', 'MobileNetV2', 'vgg19_bn'])
-parser.add_argument('--checkpoint', type=str, required=True, help='The checkpoint to be pruned')
-parser.add_argument('--widen-factor', type=int, default=1, help='widen_factor for WideResNet')
-parser.add_argument('--batch-size', type=int, default=128, help='the batch size for dataloader')
-parser.add_argument('--lr', type=float, default=0.2, help='the learning rate for mask optimization')
-parser.add_argument('--nb-iter', type=int, default=2000, help='the number of iterations for training')
-parser.add_argument('--print-every', type=int, default=500, help='print results every few iterations')
-parser.add_argument('--data-dir', type=str, default='../data', help='dir to the dataset')
-parser.add_argument('--val-frac', type=float, default=0.01, help='The fraction of the validate set')
-parser.add_argument('--output-dir', type=str, default='logs/models/')
+def init_args():
+    parser = argparse.ArgumentParser(description='Train poisoned networks')
 
-parser.add_argument('--trigger-info', type=str, default='', help='The information of backdoor trigger')
-parser.add_argument('--poison-type', type=str, default='benign', choices=['badnets', 'blend', 'clean-label', 'benign'],
-                    help='type of backdoor attacks for evaluation')
-parser.add_argument('--poison-target', type=int, default=0, help='target class of backdoor attack')
-parser.add_argument('--trigger-alpha', type=float, default=1.0, help='the transparency of the trigger pattern.')
+    # Basic model parameters.
+    parser.add_argument('--arch', type=str, default='resnet18',
+                        choices=['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152', 'MobileNetV2',
+                                 'vgg19_bn'])
+    parser.add_argument('--checkpoint', type=str, default='.', help='The checkpoint to be pruned')
+    parser.add_argument('--widen-factor', type=int, default=1, help='widen_factor for WideResNet')
+    parser.add_argument('--batch-size', type=int, default=128, help='the batch size for dataloader')
+    parser.add_argument('--lr', type=float, default=0.2, help='the learning rate for mask optimization')
+    parser.add_argument('--nb-iter', type=int, default=2000, help='the number of iterations for training')
+    parser.add_argument('--print-every', type=int, default=500, help='print results every few iterations')
+    parser.add_argument('--data-dir', type=str, default='./data', help='dir to the dataset')
+    parser.add_argument('--val-frac', type=float, default=0.01, help='The fraction of the validate set')
+    parser.add_argument('--output-dir', type=str, default='./save')
 
-parser.add_argument('--anp-eps', type=float, default=0.4)
-parser.add_argument('--anp-steps', type=int, default=1)
-parser.add_argument('--anp-alpha', type=float, default=0.2)
+    parser.add_argument('--trigger-info', type=str, default='./save/trigger_info.th',
+                        help='The information of backdoor trigger')
+    parser.add_argument('--poison-type', type=str, default='benign',
+                        choices=['badnets', 'blend', 'clean-label', 'benign'],
+                        help='type of backdoor attacks for evaluation')
+    parser.add_argument('--poison-target', type=int, default=0, help='target class of backdoor attack')
+    parser.add_argument('--trigger-alpha', type=float, default=1.0, help='the transparency of the trigger pattern.')
 
-args = parser.parse_args()
-args_dict = vars(args)
-print(args_dict)
-os.makedirs(args.output_dir, exist_ok=True)
+    parser.add_argument('--anp-eps', type=float, default=0.4)
+    parser.add_argument('--anp-steps', type=int, default=1)
+    parser.add_argument('--anp-alpha', type=float, default=0.2)
+
+    args = parser.parse_args()
+    # args_dict = vars(args)
+    # print(args_dict)
+    os.makedirs(args.output_dir, exist_ok=True)
+    return args
+
+
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
-def main():
+def main(args=None, poison_test=None, state_dict=None):
+    if args is None:
+        args = init_args()
+
     MEAN_CIFAR10 = (0.4914, 0.4822, 0.4465)
     STD_CIFAR10 = (0.2023, 0.1994, 0.2010)
     transform_train = transforms.Compose([
@@ -58,25 +69,26 @@ def main():
     ])
 
     # Step 1: create dataset - clean val set, poisoned test set, and clean test set.
-    if args.trigger_info:
-        trigger_info = torch.load(args.trigger_info, map_location=device)
-    else:
-        if args.poison_type == 'benign':
-            trigger_info = None
-        else:
-            triggers = {'badnets': 'checkerboard_1corner',
-                        'clean-label': 'checkerboard_4corner',
-                        'blend': 'gaussian_noise'}
-            trigger_type = triggers[args.poison_type]
-            pattern, mask = poison.generate_trigger(trigger_type=trigger_type)
-            trigger_info = {'trigger_pattern': pattern[np.newaxis, :, :, :], 'trigger_mask': mask[np.newaxis, :, :, :],
-                            'trigger_alpha': args.trigger_alpha, 'poison_target': np.array([args.poison_target])}
-
     orig_train = CIFAR10(root=args.data_dir, train=True, download=True, transform=transform_train)
-    _, clean_val = poison.split_dataset(dataset=orig_train, val_frac=args.val_frac,
-                                        perm=np.loadtxt('./data/cifar_shuffle.txt', dtype=int))
+    _, clean_val = poison.split_dataset(dataset=orig_train, val_frac=args.val_frac)
+                                        # perm=np.loadtxt('./data/cifar_shuffle.txt', dtype=int))
     clean_test = CIFAR10(root=args.data_dir, train=False, download=True, transform=transform_test)
-    poison_test = poison.add_predefined_trigger_cifar(data_set=clean_test, trigger_info=trigger_info)
+    if poison_test is None:
+        if args.trigger_info:
+            trigger_info = torch.load(args.trigger_info, map_location=device)
+        else:
+            if args.poison_type == 'benign':
+                trigger_info = None
+            else:
+                triggers = {'badnets': 'checkerboard_1corner',
+                            'clean-label': 'checkerboard_4corner',
+                            'blend': 'gaussian_noise'}
+                trigger_type = triggers[args.poison_type]
+                pattern, mask = poison.generate_trigger(trigger_type=trigger_type)
+                trigger_info = {'trigger_pattern': pattern[np.newaxis, :, :, :],
+                                'trigger_mask': mask[np.newaxis, :, :, :],
+                                'trigger_alpha': args.trigger_alpha, 'poison_target': np.array([args.poison_target])}
+        poison_test = poison.add_predefined_trigger_cifar(data_set=clean_test, trigger_info=trigger_info)
 
     random_sampler = RandomSampler(data_source=clean_val, replacement=True,
                                    num_samples=args.print_every * args.batch_size)
@@ -86,7 +98,10 @@ def main():
     clean_test_loader = DataLoader(clean_test, batch_size=args.batch_size, num_workers=0)
 
     # Step 2: load model checkpoints and trigger info
-    state_dict = torch.load(args.checkpoint, map_location=device)
+    if state_dict is None:
+        state_dict = torch.load(args.checkpoint, map_location=device)
+
+    print(args.arch)
     net = getattr(models, args.arch)(num_classes=10, norm_layer=models.NoisyBatchNorm2d)
     load_state_dict(net, orig_state_dict=state_dict)
     net = net.to(device)
@@ -105,7 +120,7 @@ def main():
         start = time.time()
         lr = mask_optimizer.param_groups[0]['lr']
         train_loss, train_acc = mask_train(model=net, criterion=criterion, data_loader=clean_val_loader,
-                                           mask_opt=mask_optimizer, noise_opt=noise_optimizer)
+                                           mask_opt=mask_optimizer, noise_opt=noise_optimizer, args=args)
         cl_test_loss, cl_test_acc = test(model=net, criterion=criterion, data_loader=clean_test_loader)
         po_test_loss, po_test_acc = test(model=net, criterion=criterion, data_loader=poison_test_loader)
         end = time.time()
@@ -163,13 +178,13 @@ def exclude_noise(model):
             module.exclude_noise()
 
 
-def reset(model, rand_init):
+def reset(model, rand_init, eps=0.4):
     for name, module in model.named_modules():
         if isinstance(module, models.NoisyBatchNorm2d) or isinstance(module, models.NoisyBatchNorm1d):
-            module.reset(rand_init=rand_init, eps=args.anp_eps)
+            module.reset(rand_init=rand_init, eps=eps)
 
 
-def mask_train(model, criterion, mask_opt, noise_opt, data_loader):
+def mask_train(model, criterion, mask_opt, noise_opt, data_loader, args):
     model.train()
     total_correct = 0
     total_loss = 0.0
@@ -180,7 +195,7 @@ def mask_train(model, criterion, mask_opt, noise_opt, data_loader):
 
         # step 1: calculate the adversarial perturbation for neurons
         if args.anp_eps > 0.0:
-            reset(model, rand_init=True)
+            reset(model, rand_init=True, eps=args.anp_eps)
             for _ in range(args.anp_steps):
                 noise_opt.zero_grad()
 
